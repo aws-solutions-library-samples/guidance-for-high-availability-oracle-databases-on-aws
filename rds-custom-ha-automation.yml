@@ -1,0 +1,687 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: RDS Custom HA Automation
+
+Parameters:
+  
+  VpcId: 
+    Description: VPC id 
+    Type: AWS::EC2::VPC::Id
+
+  LatestAmiId:
+    Description: Image ID is from Parameter store of SSM. Leave it as-is.
+    Type:  "AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>"
+    Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
+    
+  EC2SecurityGroup:
+    Description: Enter the security group for EC2 Observer to connect RDS Custom Primary and Standby instances.
+    Type: AWS::EC2::SecurityGroup::Id
+    
+  S3bucket:
+    Description: Enter the S3 bucket path for Oracle Client <Example - kampilis-cev-files-19c-seoul/LINUX.X64_193000_client.zip>
+    Type: String
+    Default: "<bucket-name>/LINUX.X64_193000_client.zip"
+    
+  SourceDBInstanceIdentifier:
+    Description: Primary RDS Custom Database Identifier
+    Type: String
+    Default: ""
+
+  TargetDBInstanceIdentifier:
+    Description: Standby RDS Custom Database Identifier
+    Type: String
+    Default: ""
+
+  TargetDBinstanceAZ:
+    Description: Enter the AZ for Target/Read replica RDS Custom Instance should be different from Source RDS. <Example - us-east-1b>
+    Type: AWS::EC2::AvailabilityZone::Name
+
+  RDSCustomInstanceProfile:
+    Description: Enter the RDSCustomInstanceProfile for that region. <Example - AWSRDSCustomInstanceProfile-us-east-1>
+    Default: 'AWSRDSCustomInstanceProfile-<region-name>'
+    Type: String
+
+  SubnetIDforObserver:
+    Description: Enter the Public Subnet ID for deploying Observer Instance.
+    Type: AWS::EC2::Subnet::Id
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Amazon VPC Configuration"
+        Parameters:
+          - VpcId   
+      - Label:
+          default: "Observer EC2 Configuration"
+        Parameters:
+          - LatestAmiId
+          - SubnetIDforObserver
+          - EC2SecurityGroup
+      - Label:
+          default: "RDS Custom Source Configuration"
+        Parameters:
+          - SourceDBInstanceIdentifier
+      - Label:
+          default: "RDS Custom Read Replica Configuration"
+        Parameters:
+          - TargetDBInstanceIdentifier
+          - TargetDBinstanceAZ
+          - RDSCustomInstanceProfile
+      - Label:
+          default: "CEV S3 bucket Name with Oracle Client Software"
+        Parameters:
+          - S3Bucket    
+
+Resources:
+
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    DependsOn: [profileClientIDE]
+    DeletionPolicy: Retain
+    Properties:
+      InstanceType: 't3.medium'
+      ImageId: !Ref LatestAmiId
+      IamInstanceProfile: !Ref profileClientIDE
+      InstanceInitiatedShutdownBehavior: "terminate"
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp2
+            VolumeSize: '100'
+            DeleteOnTermination: 'false'
+            Encrypted: 'true'
+      Tags:
+        - Key: Name
+          Value: !Join ['-', ['RDS-Custom-Observer-HA', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]],!Sub "${AWS::Region}"]] 
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: "true"
+          DeviceIndex: "0"
+          GroupSet: 
+            - Ref: "EC2SecurityGroup"
+          SubnetId: 
+            Ref: SubnetIDforObserver 
+      UserData:
+        Fn::Base64: !Sub
+        - |
+          #!/bin/bash
+          mkdir -p /home/ec2-user/logs
+          exec &> >(tee /home/ec2-user/logs/complete-userdata-execution-statements.log)
+          sudo yum update -y
+          echo "$(date +\"%F\ %T\") * running as $(whoami)" >> /home/ec2-user/logs/bootstrap.log
+          yum install -y unzip jq aws-cfn-bootstrap
+          sudo pip3 uninstall awscli -y
+          sudo rm -r /usr/bin/aws -f
+          mkdir /home/ec2-user/awscl
+          echo "$(date +\"%F\ %T\") * Installing AWSCLI Version 2" >> /home/ec2-user/logs/bootstrap.log
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "/home/ec2-user/awscl/awscliv2.zip"
+          unzip "/home/ec2-user/awscl/awscliv2.zip" -d "/home/ec2-user/awscl"
+          sudo chown ec2-user:ec2-user /home/ec2-user/awscl/aws -R
+          sudo /home/ec2-user/awscl/aws/install -i /usr/local/aws-cli -b /usr/local/bin
+          echo "$(date +\"%F\ %T\") * installed awscli (v2)" >> /home/ec2-user/logs/bootstrap.log
+          sudo yum remove -y mariadb
+          sudo yum install git -y
+          git version >> /home/ec2-user/logs/bootstrap.log
+          sudo mkdir -p /tmp/ssm
+          wget https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/linux_amd64/amazon-ssm-agent.rpm
+          sudo systemctl enable amazon-ssm-agent  
+          sudo systemctl start amazon-ssm-agent 
+          sudo systemctl status amazon-ssm-agent 
+          echo "$(date +\"%F\ %T\") * Installed supporting packages like ssm-agent - AWSCLIv2 - git" >> /home/ec2-user/logs/bootstrap.log
+          bucketstatus=$(aws s3 ls ${S3bucket} 2>&1)
+          if echo "$bucketstatus" | grep 'The specified bucket does not exist'; then
+            echo "$(date +\"%F\ %T\") * ${S3bucket} bucket doesn't exist" >> /home/ec2-user/logs/bootstrap.log
+          elif [ -z "$bucketstatus" ]; then
+            echo "$(date +\"%F\ %T\") * ${S3bucket} file doesn't exist in the S3 bucket" >> /home/ec2-user/logs/bootstrap.log
+          else
+            echo "$(date +\"%F\ %T\") * ${S3bucket} Bucket owned and exists" >> /home/ec2-user/logs/bootstrap.log
+            echo "$(date +\"%F\ %T\") * Proceeding further to download the Oracle Client Software from S3 Bucket"
+            aws s3 cp s3://${S3bucket} /home/ec2-user/oracle-client.zip  >> /home/ec2-user/logs/bootstrap.log
+            sleep 60
+            if [ -f /home/ec2-user/oracle-client.zip ]; then
+              echo "$(date +\"%F\ %T\") * Oracle client software has been successfully copied" >> /home/ec2-user/logs/bootstrap.log
+              unzip /home/ec2-user/oracle-client.zip -d /home/ec2-user/  
+              mkdir -p /home/ec2-user/oraInventory
+              mkdir -p /home/ec2-user/oracle/client/
+              mkdir -p /home/ec2-user/oracle/client/wallet
+              sudo chown -R ec2-user:ec2-user /home/ec2-user/
+              sudo su - ec2-user
+              cd /home/ec2-user/client/
+              echo "$(date +\"%F\ %T\") * Installing the dependency  packages for Oracle Client Software installation" >> /home/ec2-user/logs/bootstrap.log
+              sudo yum install binutils-2.17.50.0.6 compat-libstdc++-33-3.2.3 gcc-4.1.2 gcc-c++-4.1.2 glibc-2.5-58 glibc-devel-2.5-58 ksh libaio-0.3.106 libaio-devel-0.3.106 libgcc-4.1.2 libstdc++-4.1.2 libstdc++-devel 4.1.2 libXext-1.0.1 expect.* -y
+              echo "$(date +\"%F\ %T\") * Installation of Dependency packages step is completed" >> /home/ec2-user/logs/bootstrap.log
+              echo "$(date +\"%F\ %T\") * Proceeding on Oracle Client Software Installation" >> /home/ec2-user/logs/bootstrap.log
+              sudo su -c "/home/ec2-user/client/runInstaller -ignoreSysPrereqs  -waitforcompletion -showProgress -silent -responseFile /home/ec2-user/client/response/client_install.rsp UNIX_GROUP_NAME=ec2-user INVENTORY_LOCATION=/home/ec2-user/oraInventory ORACLE_HOME=/home/ec2-user/oracle/client ORACLE_BASE=/home/ec2-user/oracle oracle.install.client.installType=Administrator" ec2-user
+              echo "export ORACLE_BASE=/home/ec2-user"
+              echo "export ORACLE_HOME=/home/ec2-user/oracle/client" >> /home/ec2-user/.bash_profile
+              echo "export PATH=/home/ec2-user/oracle/client/bin:/usr/bin:/bin:/usr/local/bin:$PATH:." >> /home/ec2-user/.bash_profile 
+              echo "export LD_LIBRARY_PATH=/home/ec2-user/oracle/client/lib:/usr/lib:/usr/lib64" >> /home/ec2-user/.bash_profile
+              echo "export CLASSPATH=/home/ec2-user/oracle/client/jlib:/home/ec2-user/oracle/client/rdbms/jlib" >> /home/ec2-user/.bash_profile
+              echo "export TNS_ADMIN=/home/ec2-user/oracle/client/network/admin" >> /home/ec2-user/.bash_profile 
+              echo -e "WALLET_LOCATION=(SOURCE=(METHOD=FILE)(METHOD_DATA=(DIRECTORY=/home/ec2-user/oracle/client/wallet)))" >> /home/ec2-user/oracle/client/network/admin/sqlnet.ora
+              echo -e "SQLNET.WALLET_OVERRIDE=TRUE" >> /home/ec2-user/oracle/client/network/admin/sqlnet.ora
+              sudo chown -R ec2-user:ec2-user /home/ec2-user/
+              if [ -f /home/ec2-user/oracle/client/bin/sqlplus ]; then
+                echo "$(date +\"%F\ %T\") * Oracle Client Software Installation completed" >> /home/ec2-user/logs/bootstrap.log
+                echo "Oracle Client Home Path : /home/ec2-user/oracle/client/" >> /home/ec2-user/logs/bootstrap.log
+                echo "Oracle Wallet Path: /home/ec2-user/oracle/client/wallet" >> /home/ec2-user/logs/bootstrap.log
+                echo "Bash Profile Path: /home/ec2-user/.bash_profile" >> /home/ec2-user/logs/bootstrap.log
+              else
+                echo "$(date +\"%F\ %T\") * Oracle Client Installation failed , please verify manually" >> /home/ec2-user/logs/bootstrap.log
+              fi
+            else
+              echo "$(date +\"%F\ %T\") * Oracle client software copy has been failed, please verify manually" >> /home/ec2-user/logs/bootstrap.log
+            fi       
+          fi
+        - {
+          }
+
+  roleClientIDE:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Join ['-', ['RDS-Custom-Automation-Role', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]]]
+      Description: "Permits user interaction with AWS APIs from the EC2."
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - "sts:AssumeRole"
+            Principal:
+              Service:
+                - "ec2.amazonaws.com"
+      Policies:
+        - PolicyName: !Join ['-', ['StackSetExecutionRolePolicy', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]],!Sub "${AWS::Region}"]]
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "iam:GetRole"
+                  - "iam:GetRolePolicy"
+                  - "iam:PassRole"
+                  - "iam:DetachRolePolicy"
+                  - "iam:DeleteRolePolicy"
+                  - "iam:DeleteRole"
+                  - "iam:CreateRole"
+                  - "iam:AttachRolePolicy"
+                  - "iam:PutRolePolicy"
+                  - "ce:*"  
+                Resource:
+                  - "arn:aws:iam::*:role/*"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+        - "arn:aws:iam::aws:policy/AmazonSSMFullAccess"
+        - "arn:aws:iam::aws:policy/AmazonSSMDirectoryServiceAccess"
+        - "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+        - "arn:aws:iam::aws:policy/AmazonS3FullAccess"
+        - "arn:aws:iam::aws:policy/AWSCloudFormationFullAccess"
+        - "arn:aws:iam::aws:policy/AWSLambda_FullAccess"
+        - "arn:aws:iam::aws:policy/AmazonRDSFullAccess"
+        - "arn:aws:iam::aws:policy/SecretsManagerReadWrite"
+      Tags:
+        - Key: Name
+          Value: !Join ['-', ['RDS-Custom-HA-Automation-Replica', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]]]        
+
+                      
+  profileClientIDE:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+      InstanceProfileName: !Join ['-', ['RDS-Custom-Observer-Instance-Profile', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]],!Sub "${AWS::Region}"]]
+      Path: /
+      Roles:
+        - Ref: roleClientIDE  
+
+  Replica:
+    Type: 'AWS::RDS::DBInstance'
+    DeletionPolicy: Retain
+    Properties:
+      DeletionProtection: false
+      DBInstanceIdentifier: !Ref TargetDBInstanceIdentifier
+      AvailabilityZone : !Ref TargetDBinstanceAZ
+      Engine: oracle-ee
+      ReplicaMode: mounted
+      SourceDBInstanceIdentifier: !Ref SourceDBInstanceIdentifier
+      CustomIAMInstanceProfile: !Ref RDSCustomInstanceProfile
+
+  StackSetAdministrationRole:
+    Type: AWS::IAM::Role
+    DependsOn: StackSetExecutionRole
+    Properties:
+      RoleName: !Join ['-', ['StackSetAdministrationRole', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]],!Sub "${AWS::Region}"]]
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudformation.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: Cost-Demo-StackSetAdminRolePolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sts:AssumeRole
+                Resource:
+                  - "arn:*:iam::*:role/AWSCloudFormationStackSetExecutionRole"
+      Tags:
+        - Key: Name
+          Value: !Join ['-', ['RDS-Custom-HA-Automation', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]],!Sub "${AWS::Region}"]]            
+
+  StackSetExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join ['-', ['StackSetExecutionRole', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]],!Sub "${AWS::Region}"]]
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS:
+                - !Ref "AWS::AccountId"
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: !Join ['-', ['StackSetExecutionRolePolicy', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]],!Sub "${AWS::Region}"]]
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "application-autoscaling:*"
+                  - "cloudformation:*"
+                  - "cloudwatch:*"
+                  - "cloud9:*"
+                  - "ec2:*"
+                  - "events:*"
+                  - "iam:*"
+                  - "kms:*"
+                  - "kinesis:*"
+                  - "lambda:*"
+                  - "logs:*"
+                  - "rds:*"
+                  - "rds-data:*"
+                  - "rds-db:*"
+                  - "s3:*"
+                  - "secretsmanager:*"
+                  - "sns:*"
+                  - "ssm:*"
+                  - "ssmmessages:*"
+                  - "sts:*"
+                  - "pi:*"
+                  - "sagemaker:*"
+                Resource:
+                  - "arn:aws:application-autoscaling:::*"
+                  - "arn:aws:cloudformation:::*"
+                  - "arn:aws:cloudwatch:::*"
+                  - "arn:aws:cloud9:::*"
+                  - "arn:aws:ec2:::*"
+                  - "arn:aws:events:::*"
+                  - "arn:aws:iam:::*"
+                  - "arn:aws:kms:::*"
+                  - "arn:aws:kinesis:::*"
+                  - "arn:aws:lambda:::*"
+                  - "arn:aws:logs:::*"
+                  - "arn:aws:rds:::*"
+                  - "arn:aws:rds-data:::*"
+                  - "arn:aws:rds-db:::*"
+                  - "arn:aws:s3:::*"
+                  - "arn:aws:secretsmanager:::*"
+                  - "arn:aws:sns:::*"
+                  - "arn:aws:ssm:::*"
+                  - "arn:aws:ssmmessages:::*"
+                  - "arn:aws:sts:::*"
+                  - "arn:aws:pi:::*"
+                  - "arn:aws:sagemaker:::*"
+      Tags:
+        - Key: Name
+          Value: !Join ['-', ['RDS-Custom-HA-Automation', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]],!Sub "${AWS::Region}"]]                
+
+  roleLabSupport:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Join ['-', ['RDS-Custom-HA-Automation', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]],!Sub "${AWS::Region}"]]
+      Description: "Role to permit the Lambda support functions to interact with relevant AWS APIs."
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - "sts:AssumeRole"
+            Principal:
+              Service:
+                - "lambda.amazonaws.com"
+      Policies:
+        - PolicyName: inline-policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: "arn:aws:logs:*:*:*"
+              - Effect: Allow
+                Action:
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:DescribeStackResource
+                  - cloudformation:DescribeStackResources
+                  - ec2:DescribeInstances
+                  - ec2:AssociateIamInstanceProfile
+                  - ec2:ModifyInstanceAttribute
+                  - ec2:ReplaceIamInstanceProfileAssociation
+                  - ec2:DescribeIamInstanceProfileAssociations
+                  - ec2:DisassociateIamInstanceProfile
+                  - ec2:ModifyInstanceAttribute
+                  - ec2:ReplaceIamInstanceProfileAssociation
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface
+                  - ec2:AttachNetworkInterface
+                  - iam:ListInstanceProfiles
+                  - iam:PassRole
+                  - ssm:DescribeInstanceInformation
+                  - ssm:SendCommand
+                  - ssm:ListCommands
+                  - cloud9:UpdateEnvironment
+                  - cloud9:UpdateEnvironmentSettings
+                  - cloud9:DescribeEnvironments
+                  - cloud9:ListEnvironments
+                  - cloudwatch:PutMetricData
+                  - cloudwatch:ListMetrics
+                  - cloudwatch:GetMetricData
+                  - sns:Publish
+                Resource:
+                  - arn:aws:cloudformation:::*
+                  - arn:aws:cloudwatch:::*
+                  - arn:aws:cloud9:::*
+                  - arn:aws:ec2:::*
+                  - arn:aws:iam:::*
+                  - arn:aws:ssm:::*
+                  - arn:aws:sns:::*
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
+        - "arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccess"
+        - "arn:aws:iam::aws:policy/AmazonSSMFullAccess"
+        - "arn:aws:iam::aws:policy/AWSCloudFormationFullAccess"
+        - "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+      Tags:
+        - Key: Name
+          Value: !Join ['-', ['RDS-Custom-HA-Automation', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]],!Sub "${AWS::Region}"]]
+
+  resLabSupport:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt funcLabSupport.Arn
+      StackRegion: !Ref "AWS::Region"
+      StackName: !Ref "AWS::StackName"
+      StackUUID: !Select
+        - 2
+        - !Split
+          - "/"
+          - !Ref "AWS::StackId"
+      IDEProfileArn: !GetAtt profileClientIDE.Arn
+      IDEProfileName: !Ref profileClientIDE
+      IDEEnvTagName: !Join ['-', ['RDS-Custom-Observer-HA', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]],!Sub "${AWS::Region}"]]
+      IDEBoostrapDoc: !Ref ssmDocTnsnamesSetup
+      IDEBoostrapDoc1: !Ref ssmDocWalletSetup
+      IDEBoostrapDoc2: !Ref ssmDocDGsetup
+
+  funcLabSupport:
+    Type: "AWS::Lambda::Function"
+    DependsOn: [EC2Instance,roleLabSupport,ssmDocTnsnamesSetup,ssmDocWalletSetup,ssmDocDGsetup,Replica]
+    Properties:
+      FunctionName: !Join ['-', ['RDS-Custom-HA-Automation', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]]]
+      Description: "Custom Resource to provide support operations for the RDS Custom HA Automation"
+      Handler: "index.handler"
+      Role: !GetAtt roleLabSupport.Arn
+      Runtime: "python3.9"
+      Timeout: 600
+      ReservedConcurrentExecutions: 100
+      VpcConfig:
+        SecurityGroupIds:
+          - Ref: "EC2SecurityGroup"
+        SubnetIds:
+          - Ref: SubnetIDforObserver
+      Tags:
+        - Key: Name
+          Value: !Join ['-', ['RDS-Custom-HA-Automation', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]]]
+      Environment:
+        Variables:
+          REGION: !Ref "AWS::Region" 
+      Code:
+        ZipFile: |
+          # Dependencies
+          from os import environ
+          import cfnresponse
+          import boto3
+          import urllib3
+          import json
+          import datetime
+          import time
+
+          print("[INFO]", "Initialize function")
+          session = boto3.session.Session(region_name=environ["REGION"])
+          ide = session.resource('ec2')
+          ec2 = session.client('ec2')
+          ssm = session.client('ssm')
+          cfn = boto3.client('cloudformation', region_name=environ["REGION"])
+          http = urllib3.PoolManager()
+
+          # Lambda handler function / main function
+          def handler(event, context):
+            print("[INFO]", "Invocation start")
+
+            # init response
+            props = event["ResourceProperties"]
+            response_status = cfnresponse.FAILED
+            response_data = {}
+
+            # try/catch
+            try:
+              # lowercase names, set response as success
+              result = ec2.describe_instances(Filters=[{'Name': 'tag:Name','Values': [props['IDEEnvTagName']]}])
+              if ('Reservations' in result and len(result['Reservations']) > 0):
+                e2 = result['Reservations'][0]['Instances'][0]
+                print("[INFO]", "Found IDE instance", e2['InstanceId'])
+                while e2['State']['Name'] != 'running':
+                  time.sleep(5)
+                  e2 = ec2.describe_instances(InstanceIds=[e2['InstanceId']])['Reservations'][0]['Instances'][0]          
+                #run ssm bootstrap
+                if e2['State']['Name'] == 'running':
+                  response = ssm.send_command(InstanceIds=[e2['InstanceId']],DocumentName=props["IDEBoostrapDoc"])
+                  print("[INFO]", "Started IDE bootstrap: Tnsnames.ora Configuration", response)
+                  keepWaiting = None
+                  while keepWaiting is None: 
+                    commandResp = ssm.list_commands(CommandId=response['Command']['CommandId'])
+                    if commandResp['Commands'][0]['Status'] == "InProgress" or commandResp['Commands'][0]['Status'] == "Pending":
+                      print("IDE: Validation of Tnsnames.ora Configuration is in Progress or Pending; Please Wait")            
+                      time.sleep(30)
+                    else:
+                      keepWaiting = 1
+                      if commandResp['Commands'][0]['Status'] == "Success":
+                        print("IDE: Tnsnames.ora Configuration execution is SUCCESSFUL")
+                        response = ssm.send_command(InstanceIds=[e2['InstanceId']],DocumentName=props["IDEBoostrapDoc1"])
+                        print("[INFO]", "Started IDE1 bootstrap: Wallet Configuration", response)
+                        keepWaiting = None
+                        while keepWaiting is None: 
+                          commandResp = ssm.list_commands(CommandId=response['Command']['CommandId'])
+                          if commandResp['Commands'][0]['Status'] == "InProgress" or commandResp['Commands'][0]['Status'] == "Pending":
+                            print("IDE1: Validation of Wallet Configuration is in Progress or Pending; Please Wait")             
+                            time.sleep(30)
+                          else:
+                            keepWaiting = 1
+                            if commandResp['Commands'][0]['Status'] == "Success":
+                              print("IDE1: Wallet Configuration execution is SUCCESSFUL")
+                              response = ssm.send_command(InstanceIds=[e2['InstanceId']],DocumentName=props["IDEBoostrapDoc2"])
+                              print("[INFO]", "Started IDE2 bootstrap: Dataguard Configuration", response)
+                            else:
+                              print("IDE1 bootstrap: Wallet Configuration has been FAILED.Not proceeding further on to other ssmDocDGSetup.")
+                      else:
+                        print("IDE bootstrap: Tnsnames Configuration has been FAILED.Not proceeding further on to other ssmDocWalletSetup.")
+                else:
+                  print("EC2 Observer instance [e2['InstanceId']] is not running.Not proceeding further to execute the SSMDocuments")                        
+                
+              # success
+              response_status = cfnresponse.SUCCESS
+              
+            except Exception as e:
+              print("[ERROR]", e)
+
+            # try/catch
+            try:
+              # send response to CloudFormation
+              cfnresponse.send(event, context, response_status, response_data)
+            except Exception as e:
+              print("[ERROR]", e)
+              response_status = cfnresponse.FAILED
+            print("[INFO]", "Invocation end")
+            return response_status
+                          
+
+  ssmDocTnsnamesSetup:
+    Type: "AWS::SSM::Document"
+    DependsOn: [EC2Instance]
+    Properties:
+      DocumentType: Command
+      Name: !Join ['-', ['RDS-Custom-HA-Automation-Tnsnames', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]]]
+      Tags:
+        - Key: Name
+          Value: !Join ['-', ['RDS-Custom-HA-Automation', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]],!Sub "${AWS::Region}"]]
+      Content:
+        schemaVersion: '2.2'
+        description: "Tnsnames.ora"
+        mainSteps:
+        - action: "aws:runShellScript"
+          name: tnsnamesupdate
+          inputs:
+            timeoutSeconds: '1200'
+            runCommand:
+            - sleep 300
+            - !Sub "export DB_RESOURCE_ID=`aws rds describe-db-instances --query 'DBInstances[*].[DbiResourceId]' --filters Name=db-instance-id,Values=${SourceDBInstanceIdentifier} --output text`"
+            - !Sub "export SECRET_ID=`aws secretsmanager list-secrets --query 'SecretList[*]'.Name --filters Key=tag-value,Values=$DB_RESOURCE_ID --output text | sed 's/.*do-not-delete-rds-custom-\\(.*\\)-dg/\\1/'`"
+            - !Sub "export DGPWD=`aws secretsmanager --region ${AWS::Region} get-secret-value --secret-id do-not-delete-rds-custom-$SECRET_ID-dg --query SecretString --output text` && echo \"export DGPWD=\"$DGPWD\"\""
+            - !Sub "PRIMARY_ENDPOINT=$(aws rds describe-db-instances --query 'DBInstances[*].[Endpoint.Address]' --filters Name=db-instance-id,Values=${SourceDBInstanceIdentifier} --output text)"
+            - !Sub "STANDBY_ENDPOINT=$(aws rds describe-db-instances --query 'DBInstances[*].[Endpoint.Address]' --filters Name=db-instance-id,Values=${TargetDBInstanceIdentifier} --output text)"
+            - !Sub "CHECKFORMT=$(aws rds describe-db-instances --query 'DBInstances[*].Engine' --filters Name=db-instance-id,Values=${SourceDBInstanceIdentifier} --output text | grep -o cdb)"
+            - "touch /home/ec2-user/oracle/client/network/admin/tnsnames.ora /home/ec2-user/tnsprimary.txt /home/ec2-user/tnsstandby.txt"
+            - !Sub 'if [[ "$CHECKFORMT" == "cdb" ]]; then DATABASENAME=RDSCDB && DGUSERNAME=C##RDS_DATAGUARD; else DATABASENAME=$(aws rds describe-db-instances --query DBInstances[*].DBName --filters Name=db-instance-id,Values=${SourceDBInstanceIdentifier} --output text) && DGUSERNAME=RDS_DATAGUARD;fi'
+            - !Sub 'echo "PRIMARY_RDS_CUSTOM = (DESCRIPTION = (ADDRESS = (PROTOCOL = TCP)(HOST = $PRIMARY_ENDPOINT)(PORT = 1140)) (CONNECT_DATA = (SERVER = DEDICATED) (SERVICE_NAME = $DATABASENAME)))" >> /home/ec2-user/oracle/client/network/admin/tnsnames.ora'
+            - !Sub 'echo "STANDBY_RDS_CUSTOM = (DESCRIPTION = (ADDRESS = (PROTOCOL = TCP)(HOST = $STANDBY_ENDPOINT)(PORT = 1140)) (CONNECT_DATA = (SERVER = DEDICATED) (SERVICE_NAME = $DATABASENAME)))" >> /home/ec2-user/oracle/client/network/admin/tnsnames.ora'
+            - 'echo "export ORACLE_HOME=/home/ec2-user/oracle/client" >> /home/ec2-user/tnsnames.sh'
+            - !Sub 'echo "/home/ec2-user/oracle/client/bin/dgmgrl $DGUSERNAME/$DGPWD@PRIMARY_RDS_CUSTOM as sysdg \\\"exit\\\" > /home/ec2-user/tnsprimary.txt" >> /home/ec2-user/tnsnames.sh'
+            - !Sub 'echo "/home/ec2-user/oracle/client/bin/dgmgrl $DGUSERNAME/$DGPWD@STANDBY_RDS_CUSTOM as sysdg \\\"exit\\\" > /home/ec2-user/tnsstandby.txt" >> /home/ec2-user/tnsnames.sh'
+            - 'echo "export TNS_PRIMARY=\`cat /home/ec2-user/tnsprimary.txt | grep -i \"Connected to \" | cut -d \\\" -f2\`" >> /home/ec2-user/tnsnames.sh'
+            - 'echo "export TNS_STANDBY=\`cat /home/ec2-user/tnsstandby.txt | grep -i \"Connected to \" | cut -d \\\" -f2\`" >> /home/ec2-user/tnsnames.sh'
+            - !Sub 'echo "echo \"RDS_CUSTOM_\$TNS_PRIMARY = (DESCRIPTION = (ADDRESS = (PROTOCOL = TCP)(HOST = $PRIMARY_ENDPOINT)(PORT = 1140)) (CONNECT_DATA = (SERVER = DEDICATED) (SERVICE_NAME = $DATABASENAME)))\" >> /home/ec2-user/oracle/client/network/admin/tnsnames.ora" >> /home/ec2-user/tnsnames.sh'
+            - !Sub 'echo "echo \"RDS_CUSTOM_\$TNS_STANDBY = (DESCRIPTION = (ADDRESS = (PROTOCOL = TCP)(HOST = $STANDBY_ENDPOINT)(PORT = 1140)) (CONNECT_DATA = (SERVER = DEDICATED) (SERVICE_NAME = $DATABASENAME)))\" >> /home/ec2-user/oracle/client/network/admin/tnsnames.ora" >> /home/ec2-user/tnsnames.sh'
+            - 'sudo chown -R ec2-user:ec2-user /home/ec2-user/'
+            - 'sudo su -c "sh /home/ec2-user/tnsnames.sh" ec2-user'
+            - 'sudo su -c "cat /home/ec2-user/oracle/client/network/admin/tnsnames.ora > /home/ec2-user/logs/tnsnames.log" ec2-user'
+
+  ssmDocWalletSetup:
+    Type: "AWS::SSM::Document"
+    DependsOn: [EC2Instance,ssmDocTnsnamesSetup]
+    Properties:
+      DocumentType: Command
+      Name: !Join ['-', ['RDS-Custom-HA-Automation-Wallet', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]]]
+      Tags:
+        - Key: Name
+          Value: !Join ['-', ['RDS-Custom-HA-Automation', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]],!Sub "${AWS::Region}"]]
+      Content:
+        schemaVersion: '2.2'
+        description: "Tnsnames.ora"
+        mainSteps:
+        - action: "aws:runShellScript"
+          name: OracleWalletInstallation
+          inputs:
+            timeoutSeconds: '1200'
+            runCommand:
+            - !Sub "export DB_RESOURCE_ID=`aws rds describe-db-instances --query 'DBInstances[*].[DbiResourceId]' --filters Name=db-instance-id,Values=${SourceDBInstanceIdentifier} --output text` && echo \"export DB_RESOURCE_ID=\"$DB_RESOURCE_ID\"\" >>/home/ec2-user/wallet.sh"
+            - !Sub "export SECRET_ID=`aws secretsmanager list-secrets --query 'SecretList[*]'.Name --filters Key=tag-value,Values=$DB_RESOURCE_ID --output text | sed 's/.*do-not-delete-rds-custom-\\(.*\\)-dg/\\1/'` && echo \"export SECRET_ID=\"$SECRET_ID\"\" >>/home/ec2-user/wallet.sh"
+            - !Sub "export DGPWD=`aws secretsmanager --region ${AWS::Region} get-secret-value --secret-id do-not-delete-rds-custom-$SECRET_ID-dg --query SecretString --output text` && echo \"export DGPWD=\"$DGPWD\"\" >> /home/ec2-user/wallet.sh"
+            - 'echo "echo \"Creating wallet Directory as Oracle Home/Wallet"\" >> /home/ec2-user/wallet.sh'
+            - 'echo "echo \"Directory created as /home/ec2-user/oracle/client/wallet"\" >> /home/ec2-user/wallet.sh'
+            - 'echo "/home/ec2-user/oracle/client/bin/mkstore -wrl /home/ec2-user/oracle/client/wallet -create" >> /home/ec2-user/wallet.sh'
+            - 'echo "echo \"Wallet Folder Creation completed"\" >> /home/ec2-user/wallet.sh'
+            - 'echo "echo \"Add Entries in Wallet for RDS_DATAGUARD"\" >> /home/ec2-user/wallet.sh'
+            - 'echo "export TNS_PRIMARY=\`cat /home/ec2-user/tnsprimary.txt | grep -i \"Connected to \" | cut -d \\\" -f2\`" >> /home/ec2-user/wallet.sh'
+            - 'echo "export TNS_STANDBY=\`cat /home/ec2-user/tnsstandby.txt | grep -i \"Connected to \" | cut -d \\\" -f2\`" >> /home/ec2-user/wallet.sh'
+            - !Sub "CHECKFORMT=$(aws rds describe-db-instances --query 'DBInstances[*].Engine' --filters Name=db-instance-id,Values=${SourceDBInstanceIdentifier} --output text | grep -o cdb)"
+            - !Sub 'if [[ "$CHECKFORMT" == "cdb" ]]; then DGUSERNAME=C##RDS_DATAGUARD; else DGUSERNAME=RDS_DATAGUARD;fi'
+            - !Sub 'echo "/home/ec2-user/oracle/client/bin/mkstore -wrl /home/ec2-user/oracle/client/wallet  -createCredential RDS_CUSTOM_\$TNS_PRIMARY $DGUSERNAME $DGPWD" >>  /home/ec2-user/wallet.sh'
+            - !Sub 'echo "/home/ec2-user/oracle/client/bin/mkstore -wrl /home/ec2-user/oracle/client/wallet  -createCredential RDS_CUSTOM_\$TNS_STANDBY $DGUSERNAME $DGPWD" >>  /home/ec2-user/wallet.sh'
+            - 'echo "echo \"Addition of DataGuard Login Credentials in Wallet Completed"\" >>  /home/ec2-user/wallet.sh'
+            - 'echo "echo \"List the Credentials in Wallet"\" >>  /home/ec2-user/wallet.sh'
+            - 'echo "/home/ec2-user/oracle/client/bin/mkstore -wrl /home/ec2-user/oracle/client/wallet -listCredential" >> /home/ec2-user/wallet.sh'
+            - 'echo "echo \"WALLET CREATION IS COMPLETED"\" >> /home/ec2-user/wallet.sh'
+            - 'echo "#!/usr/bin/expect" >> /home/ec2-user/wallet_exp.sh'
+            - 'echo "spawn /home/ec2-user/wallet.sh" >> /home/ec2-user/wallet_exp.sh'
+            - !Sub "export DB_RESOURCE_ID=`aws rds describe-db-instances --query 'DBInstances[*].[DbiResourceId]' --filters Name=db-instance-id,Values=${SourceDBInstanceIdentifier} --output text`"
+            - !Sub "export SECRET_ID=`aws secretsmanager list-secrets --query 'SecretList[*]'.Name --filters Key=tag-value,Values=$DB_RESOURCE_ID --output text | sed 's/.*do-not-delete-rds-custom-\\(.*\\)-dg/\\1/'`"
+            - !Sub "export DGPWD=`aws secretsmanager --region ${AWS::Region} get-secret-value --secret-id do-not-delete-rds-custom-$SECRET_ID-dg --query SecretString --output text` && echo \"export DGPWD=\"$DGPWD\"\""
+            - 'echo "expect \"*?assword\"" >> /home/ec2-user/wallet_exp.sh'
+            - 'echo "send \"$DGPWD\\r\"" >> /home/ec2-user/wallet_exp.sh'
+            - 'echo "expect \"*?assword\"" >> /home/ec2-user/wallet_exp.sh'
+            - 'echo "send \"$DGPWD\\r\"" >> /home/ec2-user/wallet_exp.sh'
+            - 'echo "expect \"*?assword\"" >> /home/ec2-user/wallet_exp.sh'
+            - 'echo "send \"$DGPWD\\r\"" >> /home/ec2-user/wallet_exp.sh'
+            - 'echo "expect \"*?assword\"" >> /home/ec2-user/wallet_exp.sh'
+            - 'echo "send \"$DGPWD\\r\"" >> /home/ec2-user/wallet_exp.sh'
+            - 'echo "expect \"*?assword\"" >> /home/ec2-user/wallet_exp.sh'
+            - 'echo "send \"$DGPWD\\r\"" >> /home/ec2-user/wallet_exp.sh'
+            - 'echo "expect eof" >> /home/ec2-user/wallet_exp.sh'
+            - 'sudo chown -R ec2-user:ec2-user /home/ec2-user/'
+            - 'chmod a+x /home/ec2-user/wallet*'
+            - 'sudo su -c "expect /home/ec2-user/wallet_exp.sh > /home/ec2-user/logs/wallet.log" ec2-user'
+
+  ssmDocDGsetup:
+    Type: "AWS::SSM::Document"
+    DependsOn: [EC2Instance,ssmDocWalletSetup]
+    Properties:
+      DocumentType: Command
+      Name: !Join ['-', ['RDS-Custom-HA-Automation-dgmgrl', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]]]
+      Tags:
+        - Key: Name
+          Value: !Join ['-', ['RDS-Custom-HA-Automation', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]],!Sub "${AWS::Region}"]]
+      Content:
+        schemaVersion: '2.2'
+        description: "Tnsnames.ora"
+        mainSteps:
+        - action: "aws:runShellScript"
+          name: DGcommands
+          inputs:
+            timeoutSeconds: '1200'
+            runCommand:
+            - !Sub "export DB_RESOURCE_ID=`aws rds describe-db-instances --query 'DBInstances[*].[DbiResourceId]' --filters Name=db-instance-id,Values=${SourceDBInstanceIdentifier} --output text`"
+            - !Sub "export SECRET_ID=`aws secretsmanager list-secrets --query 'SecretList[*]'.Name --filters Key=tag-value,Values=$DB_RESOURCE_ID --output text | sed 's/.*do-not-delete-rds-custom-\\(.*\\)-dg/\\1/'`"
+            - !Sub "export DGPWD=`aws secretsmanager --region ${AWS::Region} get-secret-value --secret-id do-not-delete-rds-custom-$SECRET_ID-dg --query SecretString --output text` && echo \"export DGPWD=\"$DGPWD\"\""
+            - 'echo "export ORACLE_HOME=/home/ec2-user/oracle/client" >> /home/ec2-user/dgmgrl.sh'
+            - 'echo "export TNS_PRIMARY=\`cat /home/ec2-user/tnsprimary.txt | grep -i \"Connected to \" | cut -d \\\" -f2\`" >> /home/ec2-user/dgmgrl.sh'
+            - 'echo "export TNS_STANDBY=\`cat /home/ec2-user/tnsstandby.txt | grep -i \"Connected to \" | cut -d \\\" -f2\`" >> /home/ec2-user/dgmgrl.sh'
+            - !Sub "CHECKFORMT=$(aws rds describe-db-instances --query 'DBInstances[*].Engine' --filters Name=db-instance-id,Values=${SourceDBInstanceIdentifier} --output text | grep -o cdb)"
+            - !Sub 'if [[ "$CHECKFORMT" == "cdb" ]]; then DGUSERNAME=C##RDS_DATAGUARD; else DGUSERNAME=RDS_DATAGUARD;fi'
+            - !Sub 'echo "/home/ec2-user/oracle/client/bin/dgmgrl $DGUSERNAME/$DGPWD@RDS_CUSTOM_\$TNS_PRIMARY as sysdg \"show configuration verbose\"" >> /home/ec2-user/dgmgrl.sh'
+            - !Sub 'echo "/home/ec2-user/oracle/client/bin/dgmgrl $DGUSERNAME/$DGPWD@RDS_CUSTOM_\$TNS_PRIMARY as sysdg \"edit database \$TNS_PRIMARY set property LogXptMode=fastsync;\"" >> /home/ec2-user/dgmgrl.sh'
+            - !Sub 'echo "/home/ec2-user/oracle/client/bin/dgmgrl $DGUSERNAME/$DGPWD@RDS_CUSTOM_\$TNS_PRIMARY as sysdg \"edit database \$TNS_STANDBY set property LogXptMode=fastsync;\"" >> /home/ec2-user/dgmgrl.sh'
+            - !Sub 'echo "/home/ec2-user/oracle/client/bin/dgmgrl $DGUSERNAME/$DGPWD@RDS_CUSTOM_\$TNS_PRIMARY as sysdg \"edit configuration set protection mode as maxavailability;\"" >> /home/ec2-user/dgmgrl.sh'
+            - !Sub 'echo "/home/ec2-user/oracle/client/bin/dgmgrl $DGUSERNAME/$DGPWD@RDS_CUSTOM_\$TNS_STANDBY as sysdg \"edit database \$TNS_STANDBY set state=apply-off;\"" >>  /home/ec2-user/dgmgrl.sh'
+            - !Sub 'echo "echo \"alter database open read only;\" | /home/ec2-user/oracle/client/bin/sqlplus $DGUSERNAME/$DGPWD@RDS_CUSTOM_\$TNS_STANDBY as sysdg" >>  /home/ec2-user/dgmgrl.sh'
+            - !Sub 'echo "/home/ec2-user/oracle/client/bin/dgmgrl $DGUSERNAME/$DGPWD@RDS_CUSTOM_\$TNS_STANDBY as sysdg \"edit database \$TNS_STANDBY set state=apply-on;\""  >>  /home/ec2-user/dgmgrl.sh'
+            - !Sub 'echo "/home/ec2-user/oracle/client/bin/dgmgrl $DGUSERNAME/$DGPWD@RDS_CUSTOM_\$TNS_PRIMARY as sysdg \"edit database \$TNS_PRIMARY set property FastStartFailoverTarget="\$TNS_STANDBY";\"" >>  /home/ec2-user/dgmgrl.sh'
+            - !Sub 'echo "/home/ec2-user/oracle/client/bin/dgmgrl $DGUSERNAME/$DGPWD@RDS_CUSTOM_\$TNS_PRIMARY as sysdg \"edit database \$TNS_STANDBY set property FastStartFailoverTarget="\$TNS_PRIMARY";\"" >>  /home/ec2-user/dgmgrl.sh'
+            - !Sub 'echo "/home/ec2-user/oracle/client/bin/dgmgrl $DGUSERNAME/$DGPWD@RDS_CUSTOM_\$TNS_PRIMARY as sysdg \"edit configuration set property FastStartFailoverThreshold=45;\"" >>  /home/ec2-user/dgmgrl.sh'
+            - !Sub 'echo "/home/ec2-user/oracle/client/bin/dgmgrl $DGUSERNAME/$DGPWD@RDS_CUSTOM_\$TNS_PRIMARY as sysdg \"enable fast_start failover;\"" >>  /home/ec2-user/dgmgrl.sh'
+            - !Sub 'echo "/home/ec2-user/oracle/client/bin/dgmgrl $DGUSERNAME/$DGPWD@RDS_CUSTOM_\$TNS_PRIMARY as sysdg \"start observer in background file is /home/ec2-user/fsfo.dat logfile is "/home/ec2-user/observer.log" connect identifier is RDS_CUSTOM_\$TNS_PRIMARY;\"" >>  /home/ec2-user/dgmgrl.sh'
+            - !Sub 'echo "/home/ec2-user/oracle/client/bin/dgmgrl $DGUSERNAME/$DGPWD@RDS_CUSTOM_\$TNS_PRIMARY as sysdg \"show observer;\"" >>  /home/ec2-user/dgmgrl.sh'
+            - !Sub 'echo "/home/ec2-user/oracle/client/bin/dgmgrl $DGUSERNAME/$DGPWD@RDS_CUSTOM_\$TNS_PRIMARY as sysdg \"show configuration verbose;\"" >>  /home/ec2-user/dgmgrl.sh'
+            - 'sudo chown -R ec2-user:ec2-user /home/ec2-user/'
+            - 'sudo su - ec2-user'
+            - 'sudo su -c "sh /home/ec2-user/dgmgrl.sh > /home/ec2-user/logs/dgmgrl.log" ec2-user'
+            - 'sudo su -c "rm -rf /home/ec2-user/*.sh" ec2-user'
+            - 'sudo su -c "rm -rf /home/ec2-user/tns*.txt" ec2-user'
