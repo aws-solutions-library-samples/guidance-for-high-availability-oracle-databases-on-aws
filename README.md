@@ -129,11 +129,14 @@ For example, if the EC2 observer instance is active, you can’t delete the IAM 
 If you choose to delete the full stack at once, be aware that the deletion policy for CloudFormation retains the EC2 observer and RDS Custom read replica by default. Turn off this setting at your own risk.
 
 
-## Security
+## Contribute
 
-See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more information.
+If you would like to contribute to the project, See [CONTRIBUTING](CONTRIBUTING.md) for more information.
 
 ## License
 
 This library is licensed under the MIT-0 License. See the LICENSE file.
 
+## Authors
+   
+Yamuna Palasamudram ( palasams@amazon.com) ,Sharath Chandra Kampili (kampilis@amazon.com) and Arnab Saha ( sahaar@amazon.com)
