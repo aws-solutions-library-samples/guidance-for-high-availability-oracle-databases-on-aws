@@ -20,6 +20,7 @@ Detailed documentation of this solution is published as blog and available by fo
 
 ## Architecture 
 
+![Arch](/Images/Architecture.png)
 
 
 
