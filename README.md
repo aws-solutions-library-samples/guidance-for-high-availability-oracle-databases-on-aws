@@ -95,18 +95,20 @@ This version of the script does not enable flashback as part of the CFN, hence a
 * Pause RDS Custom for Oracle database automation for primary and standby database and disable FSFO if it has been enabled previously.
 * Log in to the underlying RDS Custom EC2 instances on both primary and standby and create a directory using user rdsdb for storing the flashback logs.
 
-$ mkdir /rdsdbdata/fra
+```$ mkdir /rdsdbdata/fra
 $ ls -ld /rdsdbdata/fra
 drwxrwxr-x 2 rdsdb rdsdb 4096 Feb 2 16:40 /rdsdbdata/fra
 
 $ mkdir /rdsdbdata/fra
 $ ls -ld /rdsdbdata/fra
 drwxrwxr-x 2 rdsdb rdsdb 4096 Feb 2 16:40 /rdsdbdata/fra
+```
 
 * Enable flashback database on both primary and replica
 
-Enable the flashback database on both databases while the database is in
-MOUNT state:
+Enable the flashback database on both databases while the database is in MOUNT state:
+
+```
 SQL> alter system set dg_broker_start=false scope=both;
 SQL> shutdown immediate
 SQL> startup mount
@@ -114,6 +116,7 @@ SQL> alter system set db_recovery_file_dest='/rdsdbdata/fra';
 SQL> alter system set db_flashback_retention_target=60;
 SQL> alter system set db_recovery_file_dest_size=10G;
 SQL> alter database flashback on;
+```
 
 ## Troubleshooting Tips
 
