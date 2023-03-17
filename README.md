@@ -74,6 +74,8 @@ To run the CloudFormation template, complete the following steps:
     
     >> Follow the same format for the remaining values. For Name, enter value.
 
+![Arch](/Images/StackDetails.png)
+
 1. In Configure stack options, leave the current settings, and then choose Next.
 2. In the Review stack-name window, validate the settings, and then select I acknowledge that AWS CloudFormation might create IAM resources with custom names.
 3. Choose Submit.
@@ -82,8 +84,11 @@ To run the CloudFormation template, complete the following steps:
 
 CloudFormation creates an RDS Custom for Oracle read replica and sets the default protection mode to maximum availability. The stack includes an Amazon EC2 observer instance configured with Data Guard Fast-Start Failover. Creation usually takes 2-3 hours, depending on the read replica creation time. All other resources take minimal time to create and set up. To monitor progress, choose Resources in the CloudFormation template. 
 
+![Arch](/Images/stackresources.png)
 
 After the stack deploys successfully, you should see output such as the following.
+
+![Arch](/Images/complete.png)
 
 Additionally, you can also verify the documents installed at your AWS Systems Manager in the shared resources section
 
@@ -127,14 +132,21 @@ If CloudFormation fails to create the stack, complete the following steps:
 
 1. On the EC2 observer instance, read /home/ec2-user/bootstrap.log. The following output shows a successful EC2 observer instance deployment.
 
+![Arch](/Images/troubleshoot1.png)
+
 2. In CloudWatch, check the Lambda CloudWatch Log group /aws/lambda/RDS-Custom-HA-Automation-AWS_STACKID for errors when running the SSM document. The following example shows a successful execution of the Lambda function, which includes SSM documents.
+
+![Arch](/Images/troubleshooting2.png)
 
 Note: CloudFormation generates AWS::STACKID automatically. You can find this value on the CloudFormation resources page.
 
 3. In the AWS Systems Manager console, choose Documents.
 
+![Arch](/Images/documents.png)
+
 4. Choose owned by me. Then search for RDS-Custom-HA.
 
+![Arch](/Images/documentslist.png)
 
 ## Cleaning up your resources
 
