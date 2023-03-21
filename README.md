@@ -1,4 +1,4 @@
-# Github Readme : Automate high availability setup in RDS Custom for Oracle 
+# Automate high availability setup in RDS Custom for Oracle 
 
 ## Solution Overview 
 
