@@ -4,7 +4,7 @@ Description: RDS Custom HA Automation
 Parameters:
   
   VpcId: 
-    Description: VPC id 
+    Description: Enter the VPC id of RDS Custom primary instance
     Type: AWS::EC2::VPC::Id
 
   LatestAmiId:
@@ -13,64 +13,74 @@ Parameters:
     Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
     
   EC2SecurityGroup:
-    Description: Enter the security group for EC2 Observer to connect RDS Custom Primary and Standby instances.
+    Description: Enter the security group for EC2 observer instance
     Type: AWS::EC2::SecurityGroup::Id
     
   S3bucket:
-    Description: Enter the S3 bucket path for Oracle Client <Example - kampilis-cev-files-19c-seoul/LINUX.X64_193000_client.zip>
+    Description: Enter the S3 bucket path for Oracle Client <Example - <bucket-name>/LINUX.X64_193000_client.zip>
     Type: String
     Default: "<bucket-name>/LINUX.X64_193000_client.zip"
     
   SourceDBInstanceIdentifier:
-    Description: Primary RDS Custom Database Identifier
+    Description: Enter the Primary RDS Custom instance identifier
     Type: String
     Default: ""
 
   TargetDBInstanceIdentifier:
-    Description: Standby RDS Custom Database Identifier
+    Description: Enter the Standby RDS Custom instance identifier
     Type: String
     Default: ""
 
   TargetDBinstanceAZ:
-    Description: Enter the AZ for Target/Read replica RDS Custom Instance should be different from Source RDS. <Example - us-east-1b>
+    Description: Enter the AZ for standby RDS Custom replica instance identifier <Example - us-east-1b>
     Type: AWS::EC2::AvailabilityZone::Name
 
   RDSCustomInstanceProfile:
-    Description: Enter the RDSCustomInstanceProfile for that region. <Example - AWSRDSCustomInstanceProfile-us-east-1>
+    Description: Enter the RDSCustomInstanceProfile for replica instance <Example - AWSRDSCustomInstanceProfile-us-east-1>
     Default: 'AWSRDSCustomInstanceProfile-<region-name>'
     Type: String
 
   SubnetIDforObserver:
-    Description: Enter the Public Subnet ID for deploying Observer Instance.
+    Description: Enter the Subnet id for deploying EC2 observer Instance.
     Type: AWS::EC2::Subnet::Id
 
 Metadata:
   AWS::CloudFormation::Interface:
     ParameterGroups:
-      - Label:
-          default: "Amazon VPC Configuration"
+      - 
+        Label:
+          default: "Existing environmental parameters"
         Parameters:
-          - VpcId   
-      - Label:
-          default: "Observer EC2 Configuration"
+          - VpcId
+      - 
+        Label:
+          default: ""
+        Parameters:
+          - SourceDBInstanceIdentifier
+      - 
+        Label:
+          default: ""
+        Parameters:
+          - S3bucket        
+      - 
+        Label:
+          default: ""
         Parameters:
           - LatestAmiId
           - SubnetIDforObserver
           - EC2SecurityGroup
-      - Label:
-          default: "RDS Custom Source Configuration"
+      - 
+        Label:
+          default: ""
         Parameters:
-          - SourceDBInstanceIdentifier
-      - Label:
-          default: "RDS Custom Read Replica Configuration"
-        Parameters:
-          - TargetDBInstanceIdentifier
           - TargetDBinstanceAZ
           - RDSCustomInstanceProfile
-      - Label:
-          default: "CEV S3 bucket Name with Oracle Client Software"
-        Parameters:
-          - S3Bucket    
+      - 
+        Label:
+          default:  "Replica name parameter (newly created)"
+        Parameters: 
+          - TargetDBInstanceIdentifier   
+   
 
 Resources:
 
