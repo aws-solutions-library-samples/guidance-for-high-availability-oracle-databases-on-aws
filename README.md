@@ -167,7 +167,7 @@ If you choose to delete the full stack at once, be aware that the deletion polic
 
 
 ## Contributors 
-- Sharath Chandra Kampilis 
+- Sharath Chandra Kampili
 - Arnab Saha
 - Yamuna Palasamudram
 
