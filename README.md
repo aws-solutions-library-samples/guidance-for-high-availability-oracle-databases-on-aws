@@ -14,10 +14,10 @@ This solution includes a CloudFormation template that will take minimum inputs f
     * SSM Document3 - To make configuration changes on the standby and also enable the fast start fail over.
 
 
-⚠️ Although this is a non invasive script , make sure you test and run in Dev/ Test environment before you run the scrip in Production. 
+⚠️  Although this is a non invasive script , make sure you test and implement this solution in Dev/Test environment before you implement it in Production.
 
-Detailed documentation of this solution is published as blog and available by following the link below.  <<<<. Blog Link to follow >>>>>> 
-
+Refer to <<<<. Blog Link to follow >>>>>>  for detailed documentation of this solution.
+  
 ## Architecture 
 
 ![Arch](/Images/Architecture.png)
@@ -67,9 +67,9 @@ To run the CloudFormation template, complete the following steps:
 
 ![Arch](/Images/StackDetails.png)
 
-1. In Configure stack options, leave the current settings, and then choose Next.
-2. In the Review stack-name window, validate the settings, and then select I acknowledge that AWS CloudFormation might create IAM resources with custom names.
-3. Choose Submit.
+6. In Configure stack options, leave the current settings, and then choose Next.
+7. In the Review stack-name window, validate the settings, and then select I acknowledge that AWS CloudFormation might create IAM resources with custom names.
+8. Choose Submit.
 
 
 CloudFormation creates an RDS Custom for Oracle read replica and sets the default protection mode to maximum availability. The stack includes an Amazon EC2 observer instance configured with Data Guard Fast-Start Failover. Creation usually takes 2-3 hours, depending on the read replica creation time. All other resources take minimal time to create and set up. To monitor progress, choose Resources in the CloudFormation template.  
