@@ -23,26 +23,17 @@ Detailed documentation of this solution is published as blog and available by fo
 ![Arch](/Images/Architecture.png)
 
 
-
 ## Prerequisites
 
-The CloudFormation script doesn’t create or configure any of the following resources, all of which are required for RDS Custom: 
-
-* VPC
-* IAM roles
-* Instance profiles
-* Amazon S3 buckets
-* KMS keys
-
-Review Prerequisites for creating an RDS Custom for Oracle instance in the RDS documentation and complete all preinstallation steps.
+You should have a primary RDS Custom for Oracle DB instance up and available prior to using this solution. This script doesn’t provide capabilities to create and configure a customer VPC, [AWS Identity and Access Management](http://aws.amazon.com/iam) (IAM) roles, instance profiles, S3 buckets, and [AWS Key Management Keys](http://aws.amazon.com/kms) (AWS KMS) keys that are needed for RDS Custom for Oracle because these are generally configured and controlled by different teams in most organizations. Refer to [Prerequisites for creating an RDS Custom for Oracle instance](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/custom-setup-orcl.html#custom-setup-orcl.review) and ensure all the RDS Custom for Oracle pre-installation steps are performed. 
 
 Before running the CloudFormation script, make sure to meet the following additional prerequisites:
 
 1. The RDS Custom primary DB instance runs Oracle Database 19c and is in an available state.
 2. You have an Amazon S3 bucket that includes the Oracle home client zip file. For the Oracle Database 19c Oracle home, the file is LINUX.X64_193000_client.zip. You can download the full client for Oracle Database 19c from https://www.oracle.com/database/technologies/oracle19c-linux-downloads.html or https://www.oracle.com/database/technologies/oracle19c-linux-downloads.html#license-lightbox.
-3. If you use different security groups for RDS and the EC2 observer, make sure that the EC2 observer instance security group permits traffic from the RDS Listener port (for example, 1521) and 1140 for the RDS security group.
-4. You have met the general requirementsand network requirements for read replica creation. The CloudFormation script creates an RDS Custom for Oracle read replica.
-5. The user running the CloudFormation template has the privileges to run it using the console or CLI.
+3. If you use different security groups for RDS and the EC2 observer, make sure that the EC2 observer instance security group permits traffic from the RDS Listener port (for example, 1521) and 1140 (Data Guard port) for the RDS security group.
+4. The script is designed to create an  RDS Custom for Oracle read replica. Ensure the [general requirements](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/custom-rr.html#custom-rr.limitations) and [network requirements](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/custom-rr.html#custom-rr.network) for the read replica creation are met.
+5. The user running this solution  should have privileges to run the CloudFormation template either via the  AWS CloudFormation console or [AWS Command Line Interface](http://aws.amazon.com/cli) (AWS CLI).
 
 
 ### List of input parameters to be ready with before deploying the stack
@@ -60,8 +51,8 @@ Before running the CloudFormation script, make sure to meet the following additi
 
 To run the CloudFormation template, complete the following steps:
 
-1. Download the YAML file from Gitlab.
-2. Sign in to the AWS Management Console and open the CloudFormation console athttps://console.aws.amazon.com/cloudformation/. Choose the same AWS Region where your RDS Custom primary DB instance resides.
+1. Download the YAML file from [Github](https://github.com/aws-samples/amazon-rds-custom-oracle-ha-automation).
+2. Sign in to the AWS Management Console and open the CloudFormation console at https://console.aws.amazon.com/cloudformation/. Choose the same AWS Region where your RDS Custom primary DB instance resides.
 3. Choose Create Stack. 
 4. In the Create Stack page, do the following:
     a. Choose Template is ready.
@@ -81,8 +72,7 @@ To run the CloudFormation template, complete the following steps:
 3. Choose Submit.
 
 
-
-CloudFormation creates an RDS Custom for Oracle read replica and sets the default protection mode to maximum availability. The stack includes an Amazon EC2 observer instance configured with Data Guard Fast-Start Failover. Creation usually takes 2-3 hours, depending on the read replica creation time. All other resources take minimal time to create and set up. To monitor progress, choose Resources in the CloudFormation template. 
+CloudFormation creates an RDS Custom for Oracle read replica and sets the default protection mode to maximum availability. The stack includes an Amazon EC2 observer instance configured with Data Guard Fast-Start Failover. Creation usually takes 2-3 hours, depending on the read replica creation time. All other resources take minimal time to create and set up. To monitor progress, choose Resources in the CloudFormation template.  
 
 ![Arch](/Images/stackresources.png)
 
@@ -95,13 +85,14 @@ Additionally, you can also verify the documents installed at your AWS Systems Ma
 
 ## Enable Flashback:
 
-This version of the script does not enable flashback as part of the CFN, hence after a data guard fail over from primary to standby, the old primary has to be rebuilt from backup. In order to automatically reinstate the old primary, Flashback database feature should be enabled on both primary and standby prior to a fail over. Follow the below steps to enable Flashback database before testing the fail over. For your testing, if you do not enable flashback every time after a fail over you have to delete the old primary by disabling FSFO and re create or delete both primary and standby and create a new stack.
+This version of the script does not enable flashback as part of the CFN, hence after a data guard fail over from primary to standby, the old primary has to be rebuilt from backup. In order to automatically reinstate the old primary, Flashback database feature should be enabled on both primary and standby prior to a fail over. Follow the below steps to enable Flashback database before testing the fail over. If you do not enable flashback every time after a fail over you have to delete the old primary by disabling FSFO and re create or delete both primary and standby and create a new stack.
 
 
 * Pause RDS Custom for Oracle database automation for primary and standby database and disable FSFO if it has been enabled previously.
 * Log in to the underlying RDS Custom EC2 instances on both primary and standby and create a directory using user rdsdb for storing the flashback logs.
 
-```$ mkdir /rdsdbdata/fra
+```
+$ mkdir /rdsdbdata/fra
 $ ls -ld /rdsdbdata/fra
 drwxrwxr-x 2 rdsdb rdsdb 4096 Feb 2 16:40 /rdsdbdata/fra
 
@@ -110,18 +101,25 @@ $ ls -ld /rdsdbdata/fra
 drwxrwxr-x 2 rdsdb rdsdb 4096 Feb 2 16:40 /rdsdbdata/fra
 ```
 
-* Enable flashback database on both primary and replica
-
-Enable the flashback database on both databases while the database is in MOUNT state:
+* Enable flashback database on the primary database:
 
 ```
-SQL> alter system set dg_broker_start=false scope=both;
-SQL> shutdown immediate
-SQL> startup mount
 SQL> alter system set db_recovery_file_dest='/rdsdbdata/fra';
 SQL> alter system set db_flashback_retention_target=60;
 SQL> alter system set db_recovery_file_dest_size=10G;
 SQL> alter database flashback on;
+```
+
+* Enable flashback database on the standby database:
+
+```
+DGMGRL> disable fast_start failover;
+DGMGRL> edit database "ORCL_B" set state=apply-off;
+SQL> alter system set db_recovery_file_dest='/rdsdbdata/fra';
+SQL> alter system set db_flashback_retention_target=60;
+SQL> alter system set db_recovery_file_dest_size=10G;
+DGMGRL> edit database "ORCL_B" set state=apply-on;
+DGMGRL> enable fast_start failover;
 ```
 
 ## Troubleshooting Tips
@@ -130,7 +128,7 @@ SQL> alter database flashback on;
 
 If CloudFormation fails to create the stack, complete the following steps:
 
-1. On the EC2 observer instance, read /home/ec2-user/bootstrap.log. The following output shows a successful EC2 observer instance deployment.
+1. On the EC2 observer instance, read /home/ec2-user/logs/bootstrap.log. The following output shows a successful EC2 observer instance deployment.
 
 ![Arch](/Images/troubleshoot1.png)
 
@@ -152,7 +150,7 @@ Note: CloudFormation generates AWS::STACKID automatically. You can find this val
 
 When you clean up, you can either delete individual resources or the entire stack. We recommend that you delete resources individually as needed.
 
-Deleting resources individually
+### Deleting resources individually
 
 To clean up a specific resource, follow the documented procedure for deleting this resource. Make sure that you are aware of any dependencies. Consider the following guidelines:
 
