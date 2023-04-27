@@ -153,6 +153,7 @@ Resources:
               mkdir -p /home/ec2-user/oraInventory
               mkdir -p /home/ec2-user/oracle/client/
               mkdir -p /home/ec2-user/oracle/client/wallet
+              mkdir -p /home/ec2-user/oracle/client/wallet/backup
               sudo chown -R ec2-user:ec2-user /home/ec2-user/
               sudo su - ec2-user
               cd /home/ec2-user/client/
@@ -174,6 +175,7 @@ Resources:
                 echo "$(date +\"%F\ %T\") * Oracle Client Software Installation completed" >> /home/ec2-user/logs/bootstrap.log
                 echo "Oracle Client Home Path : /home/ec2-user/oracle/client/" >> /home/ec2-user/logs/bootstrap.log
                 echo "Oracle Wallet Path: /home/ec2-user/oracle/client/wallet" >> /home/ec2-user/logs/bootstrap.log
+                echo "Oracle Wallet Backup Path: /home/ec2-user/oracle/client/wallet/backup" >> /home/ec2-user/logs/bootstrap.log
                 echo "Bash Profile Path: /home/ec2-user/.bash_profile" >> /home/ec2-user/logs/bootstrap.log
               else
                 echo "$(date +\"%F\ %T\") * Oracle Client Installation failed , please verify manually" >> /home/ec2-user/logs/bootstrap.log
@@ -420,6 +422,7 @@ Resources:
         - "arn:aws:iam::aws:policy/AmazonSSMFullAccess"
         - "arn:aws:iam::aws:policy/AWSCloudFormationFullAccess"
         - "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
       Tags:
         - Key: Name
           Value: !Join ['-', ['RDS-Custom-HA-Automation', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]],!Sub "${AWS::Region}"]]
@@ -605,7 +608,7 @@ Resources:
           Value: !Join ['-', ['RDS-Custom-HA-Automation', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]],!Sub "${AWS::Region}"]]
       Content:
         schemaVersion: '2.2'
-        description: "Tnsnames.ora"
+        description: "Wallet Setup"
         mainSteps:
         - action: "aws:runShellScript"
           name: OracleWalletInstallation
@@ -661,7 +664,7 @@ Resources:
           Value: !Join ['-', ['RDS-Custom-HA-Automation', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]],!Sub "${AWS::Region}"]]
       Content:
         schemaVersion: '2.2'
-        description: "Tnsnames.ora"
+        description: "Dataguard Setup"
         mainSteps:
         - action: "aws:runShellScript"
           name: DGcommands
@@ -695,3 +698,196 @@ Resources:
             - 'sudo su -c "sh /home/ec2-user/dgmgrl.sh > /home/ec2-user/logs/dgmgrl.log" ec2-user'
             - 'sudo su -c "rm -rf /home/ec2-user/*.sh" ec2-user'
             - 'sudo su -c "rm -rf /home/ec2-user/tns*.txt" ec2-user'
+
+  CredentialchangeEventRule:
+    Type: AWS::Events::Rule
+    DeletionPolicy: Retain
+    Properties: 
+      Description: Event Bridge rule 
+      EventPattern:
+        source: 
+          - "aws.rds"
+        detail-type: 
+          - "RDS DB Instance Event"
+        detail: 
+          EventCategories: 
+            - "notification"
+          EventID:
+            - "RDS-EVENT-0167"
+          Message:
+            - "The database monitoring user or user credentials have changed."  
+          SourceIdentifier:
+            - !Ref SourceDBInstanceIdentifier   
+      Name: !Join ['-', ['RDS-Custom-HA-Automation-Eventrule', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]],!Sub "${AWS::Region}"]]      
+      Targets:
+        - Arn: !GetAtt CredentialChangeLambdaFunction.Arn
+          Id: CallLambdaFunction
+
+  gdbmanagedeplambdapermission:
+    Type: AWS::Lambda::Permission
+    DependsOn: CredentialchangeEventRule
+    DeletionPolicy: Retain
+    Properties: 
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt CredentialChangeLambdaFunction.Arn
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt CredentialchangeEventRule.Arn      
+
+  ssmDocWalletresetup:
+    Type: "AWS::SSM::Document"
+    DependsOn: [EC2Instance,roleLabSupport,ssmDocTnsnamesSetup,ssmDocWalletSetup,ssmDocDGsetup,Replica]
+    DeletionPolicy: Retain
+    Properties:
+      DocumentType: Command
+      Name: !Join ['-', ['RDS-Custom-HA-Automation-Wallet-resetup', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]]]
+      Tags:
+        - Key: Name
+          Value: !Join ['-', ['RDS-Custom-HA-Automation-Wallet-resetup', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]],!Sub "${AWS::Region}"]]
+      Content:
+        schemaVersion: '2.2'
+        description: "Walletresetup"
+        mainSteps:
+        - action: "aws:runShellScript"
+          name: OracleWalletresetup
+          inputs:
+            timeoutSeconds: '1200'
+            runCommand:
+            - !Sub "export DB_RESOURCE_ID=`aws rds describe-db-instances --query 'DBInstances[*].[DbiResourceId]' --filters Name=db-instance-id,Values=${SourceDBInstanceIdentifier} --output text` && echo \"export DB_RESOURCE_ID=\"$DB_RESOURCE_ID\"\" >>/home/ec2-user/wallet.sh"
+            - !Sub "export SECRET_ID=`aws secretsmanager list-secrets --query 'SecretList[*]'.Name --filters Key=tag-value,Values=$DB_RESOURCE_ID --output text | sed 's/.*do-not-delete-rds-custom-\\(.*\\)-dg/\\1/'` && echo \"export SECRET_ID=\"$SECRET_ID\"\" >>/home/ec2-user/wallet.sh"
+            - !Sub "export DGPWD=`aws secretsmanager --region ${AWS::Region} get-secret-value --secret-id do-not-delete-rds-custom-$SECRET_ID-dg --query SecretString --output text` && echo \"export DGPWD=\"$DGPWD\"\" >> /home/ec2-user/wallet.sh"
+            - 'echo "echo \"Creating wallet Directory as Oracle Home/Wallet"\" >> /home/ec2-user/wallet.sh'
+            - 'echo "echo \"Directory created as /home/ec2-user/oracle/client/wallet"\" >> /home/ec2-user/wallet.sh'
+            - 'echo "mv /home/ec2-user/oracle/client/wallet/*wallet* /home/ec2-user/oracle/client/wallet/backup/" >> /home/ec2-user/wallet.sh'
+            - 'echo "/home/ec2-user/oracle/client/bin/mkstore -wrl /home/ec2-user/oracle/client/wallet -create" >> /home/ec2-user/wallet.sh'
+            - 'echo "echo \"Wallet Folder Creation completed"\" >> /home/ec2-user/wallet.sh'
+            - 'echo "echo \"Add Entries in Wallet for RDS_DATAGUARD"\" >> /home/ec2-user/wallet.sh'
+            - 'echo "export TNS_PRIMARY=\`cat /home/ec2-user/tnsprimary.txt | grep -i \"Connected to \" | cut -d \\\" -f2\`" >> /home/ec2-user/wallet.sh'
+            - 'echo "export TNS_STANDBY=\`cat /home/ec2-user/tnsstandby.txt | grep -i \"Connected to \" | cut -d \\\" -f2\`" >> /home/ec2-user/wallet.sh'
+            - !Sub "CHECKFORMT=$(aws rds describe-db-instances --query 'DBInstances[*].Engine' --filters Name=db-instance-id,Values=${SourceDBInstanceIdentifier} --output text | grep -o cdb)"
+            - !Sub 'if [[ "$CHECKFORMT" == "cdb" ]]; then DGUSERNAME=C##RDS_DATAGUARD; else DGUSERNAME=RDS_DATAGUARD;fi'
+            - !Sub 'echo "/home/ec2-user/oracle/client/bin/mkstore -wrl /home/ec2-user/oracle/client/wallet  -createCredential RDS_CUSTOM_\$TNS_PRIMARY $DGUSERNAME $DGPWD" >>  /home/ec2-user/wallet.sh'
+            - !Sub 'echo "/home/ec2-user/oracle/client/bin/mkstore -wrl /home/ec2-user/oracle/client/wallet  -createCredential RDS_CUSTOM_\$TNS_STANDBY $DGUSERNAME $DGPWD" >>  /home/ec2-user/wallet.sh'
+            - 'echo "echo \"Addition of DataGuard Login Credentials in Wallet Completed"\" >>  /home/ec2-user/wallet.sh'
+            - 'echo "echo \"List the Credentials in Wallet"\" >>  /home/ec2-user/wallet.sh'
+            - 'echo "/home/ec2-user/oracle/client/bin/mkstore -wrl /home/ec2-user/oracle/client/wallet -listCredential" >> /home/ec2-user/wallet.sh'
+            - 'echo "echo \"WALLET CREATION IS COMPLETED"\" >> /home/ec2-user/wallet.sh'
+            - 'echo "#!/usr/bin/expect" >> /home/ec2-user/wallet_exp.sh'
+            - 'echo "spawn /home/ec2-user/wallet.sh" >> /home/ec2-user/wallet_exp.sh'
+            - !Sub "export DB_RESOURCE_ID=`aws rds describe-db-instances --query 'DBInstances[*].[DbiResourceId]' --filters Name=db-instance-id,Values=${SourceDBInstanceIdentifier} --output text`"
+            - !Sub "export SECRET_ID=`aws secretsmanager list-secrets --query 'SecretList[*]'.Name --filters Key=tag-value,Values=$DB_RESOURCE_ID --output text | sed 's/.*do-not-delete-rds-custom-\\(.*\\)-dg/\\1/'`"
+            - !Sub "export DGPWD=`aws secretsmanager --region ${AWS::Region} get-secret-value --secret-id do-not-delete-rds-custom-$SECRET_ID-dg --query SecretString --output text` && echo \"export DGPWD=\"$DGPWD\"\""
+            - 'echo "expect \"*?assword\"" >> /home/ec2-user/wallet_exp.sh'
+            - 'echo "send \"$DGPWD\\r\"" >> /home/ec2-user/wallet_exp.sh'
+            - 'echo "expect \"*?assword\"" >> /home/ec2-user/wallet_exp.sh'
+            - 'echo "send \"$DGPWD\\r\"" >> /home/ec2-user/wallet_exp.sh'
+            - 'echo "expect \"*?assword\"" >> /home/ec2-user/wallet_exp.sh'
+            - 'echo "send \"$DGPWD\\r\"" >> /home/ec2-user/wallet_exp.sh'
+            - 'echo "expect \"*?assword\"" >> /home/ec2-user/wallet_exp.sh'
+            - 'echo "send \"$DGPWD\\r\"" >> /home/ec2-user/wallet_exp.sh'
+            - 'echo "expect \"*?assword\"" >> /home/ec2-user/wallet_exp.sh'
+            - 'echo "send \"$DGPWD\\r\"" >> /home/ec2-user/wallet_exp.sh'
+            - 'echo "expect eof" >> /home/ec2-user/wallet_exp.sh'
+            - 'sudo chown -R ec2-user:ec2-user /home/ec2-user/'
+            - 'chmod a+x /home/ec2-user/wallet*'
+            - 'sudo su -c "expect /home/ec2-user/wallet_exp.sh > /home/ec2-user/logs/wallet.log" ec2-user'
+
+  CredentialChangeLambdaFunction:
+    Type: "AWS::Lambda::Function"
+    DependsOn: [EC2Instance,roleLabSupport,ssmDocTnsnamesSetup,ssmDocWalletSetup,ssmDocDGsetup,ssmDocWalletresetup,funcLabSupport]
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: !Join ['-', ['RDS-Custom-HA-Automation-Wallet-Resetup', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]]]
+      Description: "Custom Resource to provide support operations for the RDS Custom HA Automation"
+      Handler: "index.handler"
+      Role: !GetAtt roleLabSupport.Arn
+      Runtime: "python3.9"
+      Timeout: 600
+      ReservedConcurrentExecutions: 100
+      VpcConfig:
+        SecurityGroupIds:
+          - Ref: "EC2SecurityGroup"
+        SubnetIds:
+          - Ref: SubnetIDforObserver
+      Tags:
+        - Key: Name
+          Value: !Join ['-', ['RDS-Custom-HA-Automation', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]]]
+      Environment:
+        Variables:
+          REGION: !Ref "AWS::Region"
+          INSTANCE_ID: !Ref EC2Instance
+          DOCUMENT: !Ref ssmDocWalletresetup
+      Code:
+        ZipFile: |
+          # Dependencies
+          from os import environ
+          import cfnresponse
+          import boto3
+          import urllib3
+          import json
+          import datetime
+          import time
+          import os
+
+          print("[INFO]", "Initialize function")
+          session = boto3.session.Session(region_name=environ["REGION"])
+          ide = session.resource('ec2')
+          ec2 = session.client('ec2')
+          ssm = session.client('ssm')
+          cfn = boto3.client('cloudformation', region_name=environ["REGION"])
+          http = urllib3.PoolManager()
+
+          # Lambda handler function / main function
+          def handler(event, context):
+            print("[INFO]", "Invocation start")
+
+            # init response
+            
+            response_status = cfnresponse.FAILED
+            response_data = {}
+
+            # try/catch
+            try:
+              # lowercase names, set response as success
+              instance_id = os.environ['INSTANCE_ID']
+              ssmDocWalletresetup = os.environ['DOCUMENT']
+              result = ec2.describe_instances(InstanceIds=[instance_id])
+              if ('Reservations' in result and len(result['Reservations']) > 0):
+                e2 = result['Reservations'][0]['Instances'][0]
+                print("[INFO]", "Found IDE instance", e2['InstanceId'])
+                while e2['State']['Name'] != 'running':
+                  time.sleep(5)
+                  e2 = ec2.describe_instances(InstanceIds=[e2['InstanceId']])['Reservations'][0]['Instances'][0]          
+                #run ssm bootstrap
+                if e2['State']['Name'] == 'running':
+                  response = ssm.send_command(InstanceIds=[e2['InstanceId']],DocumentName=ssmDocWalletresetup)
+                  print("[INFO]", "Started IDE bootstrap: Tnsnames.ora Configuration", response)
+                  keepWaiting = None
+                  while keepWaiting is None: 
+                    commandResp = ssm.list_commands(CommandId=response['Command']['CommandId'])
+                    if commandResp['Commands'][0]['Status'] == "InProgress" or commandResp['Commands'][0]['Status'] == "Pending":
+                      print("IDE: Validation of Tnsnames.ora Configuration is in Progress or Pending; Please Wait")            
+                      time.sleep(30)
+                    else:
+                      keepWaiting = 1
+                      if commandResp['Commands'][0]['Status'] == "Success":
+                        print("IDE: Wallet Resetup execution is SUCCESSFUL")
+                      else:
+                        print("IDE bootstrap: Wallet Resetup execution has been FAILED.")
+                else:
+                  print("EC2 Observer instance [e2['InstanceId']] is not running.Not proceeding further to execute the SSMDocuments")                        
+                
+              # success
+              response_status = cfnresponse.SUCCESS
+              
+            except Exception as e:
+              print("[ERROR]", e)
+
+            # try/catch
+            try:
+              # send response to CloudFormation
+              cfnresponse.send(event, context, response_status, response_data)
+            except Exception as e:
+              print("[ERROR]", e)
+              response_status = cfnresponse.FAILED
+            print("[INFO]", "Invocation end")
+            return response_status
