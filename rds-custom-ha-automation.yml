@@ -860,12 +860,12 @@ Resources:
                 #run ssm bootstrap
                 if e2['State']['Name'] == 'running':
                   response = ssm.send_command(InstanceIds=[e2['InstanceId']],DocumentName=ssmDocWalletresetup)
-                  print("[INFO]", "Started IDE bootstrap: Tnsnames.ora Configuration", response)
+                  print("[INFO]", "Started IDE bootstrap: Wallet Resetup Configuration", response)
                   keepWaiting = None
                   while keepWaiting is None: 
                     commandResp = ssm.list_commands(CommandId=response['Command']['CommandId'])
                     if commandResp['Commands'][0]['Status'] == "InProgress" or commandResp['Commands'][0]['Status'] == "Pending":
-                      print("IDE: Validation of Tnsnames.ora Configuration is in Progress or Pending; Please Wait")            
+                      print("IDE: Validation of Wallet Resetup Configuration is in Progress or Pending; Please Wait")            
                       time.sleep(30)
                     else:
                       keepWaiting = 1
