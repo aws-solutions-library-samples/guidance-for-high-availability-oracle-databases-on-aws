@@ -78,6 +78,7 @@ CloudFormation creates an RDS Custom for Oracle read replica and sets the defaul
 
 After the stack deploys successfully, you should see output such as the following.
 
+![Arch](/Images/complete0.png)
 ![Arch](/Images/complete.png)
 
 Additionally, you can also verify the documents installed at your AWS Systems Manager in the shared resources section
