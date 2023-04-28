@@ -52,7 +52,7 @@ Before running the CloudFormation script, make sure to meet the following additi
 To run the CloudFormation template, complete the following steps:
 
 1. Download the YAML file from [Github](https://github.com/aws-samples/amazon-rds-custom-oracle-ha-automation).
-2. Sign in to the AWS Management Console and open the CloudFormation console at https://console.aws.amazon.com/cloudformation/. Choose the same AWS Region where your RDS Custom primary DB instance resides.
+2. Sign in to the AWS Management Console and open the [CloudFormation console](https://console.aws.amazon.com/cloudformation). Choose the same AWS Region where your RDS Custom primary DB instance resides.
 3. Choose Create Stack. 
 4. In the Create Stack page, do the following:
     a. Choose Template is ready.
