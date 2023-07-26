@@ -16,7 +16,7 @@ This solution includes a CloudFormation template that will take minimum inputs f
 
 ⚠️  Although this is a non invasive script , make sure you test and implement this solution in Dev/Test environment before you implement it in Production.
 
-Refer to <<<<. Blog Link to follow >>>>>>  for detailed documentation of this solution.
+Refer to ["Automate high availability setup in Amazon RDS Custom for Oracle"](https://aws.amazon.com/blogs/database/automate-high-availability-setup-in-amazon-rds-custom-for-oracle/)  for detailed documentation of this solution.
   
 ## Architecture 
 
