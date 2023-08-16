@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: RDS Custom HA Automation
+Description: Guidance for High Availability Oracle Databases with Amazon RDS (SO9265)
 
 Parameters:
   
